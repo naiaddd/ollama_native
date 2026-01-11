@@ -1,0 +1,316 @@
+import {
+    Button,
+    LineEdit,
+    ScrollView,
+    ComboBox,
+    CheckBox,
+} from "std-widgets.slint";
+
+export struct HistoryEntry {
+    id: string,
+    title: string,
+}
+
+export component AppWindow inherits Window {
+    preferred-width: 800px;
+    preferred-height: 600px;
+    title: "Ollama Native Pro";
+    background: #0f111a;
+
+    in property <[string]> model_list: ["loading..."];
+    in-out property <string> selected_model: "";
+    in-out property <string> default_model_setting: "";
+    in property <string> chat_text: "";
+    in property <string> version: "v1.0.0 Stable";
+    in property <[HistoryEntry]> history_list: [];
+
+    in-out property <bool> scroll_lock: true;
+    property <bool> sidebar_expanded: false;
+    property <bool> settings_expanded: false;
+
+    callback send_message(string);
+    callback clear_chat();
+    callback set_default_model(string);
+    callback load_session(string);
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+
+        main_layout := VerticalLayout {
+            padding: 20px;
+            padding-left: 65px;
+            spacing: 15px;
+
+            chat_area := Rectangle {
+                background: #1a1c25;
+                border-radius: 8px;
+                vertical-stretch: 1;
+
+                if (root.chat_text == ""): VerticalLayout {
+                    width: 100%;
+                    height: 100%;
+                    alignment: center;
+                    Text {
+                        text: "Ollama Native";
+                        color: #ffffff;
+                        font-size: 38px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: root.version;
+                        color: #444;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                if (root.chat_text != ""): ScrollView {
+                    changed viewport-height => {
+                        if (root.scroll_lock) {
+                            self.viewport-y = min(0px, self.height - content.preferred-height);
+                        }
+                    }
+                    content := VerticalLayout {
+                        padding: 20px;
+                        Text {
+                            text: root.chat_text;
+                            color: white;
+                            wrap: word-wrap;
+                            font-size: 15px;
+                        }
+                    }
+                }
+
+                TouchArea {
+                    x: parent.width - 40px;
+                    y: 15px;
+                    width: 25px;
+                    height: 25px;
+                    clicked => {
+                        root.clear_chat();
+                    }
+                    mouse-cursor: pointer;
+                    Rectangle {
+                        background: #333;
+                        border-radius: 4px;
+                        opacity: 0.5;
+                    }
+
+                    Rectangle {
+                        background: #aaa;
+                        width: 2px;
+                        height: 12px;
+                        x: 11.5px;
+                        y: 6.5px;
+                    }
+
+                    Rectangle {
+                        background: #aaa;
+                        width: 12px;
+                        height: 2px;
+                        x: 6.5px;
+                        y: 11.5px;
+                    }
+                }
+            }
+
+            LineEdit {
+                placeholder-text: "Type a message...";
+                font-size: 14px;
+                height: 45px;
+                accepted(val) => {
+                    root.send_message(val);
+                    self.text = "";
+                }
+            }
+        }
+
+        sidebar := Rectangle {
+            x: 0;
+            width: root.sidebar_expanded ? 240px : 45px;
+            background: #161821;
+            animate width { duration: 150ms; }
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.move) {
+                        root.sidebar_expanded = true;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                padding: 15px;
+                spacing: 20px;
+                // Removed alignment: start to allow vertical-stretch to work
+                visible: root.sidebar_expanded;
+
+                // Active Model Header (White)
+                VerticalLayout {
+                    spacing: 5px;
+                    Text {
+                        text: "ACTIVE MODEL";
+                        color: white; // Matched to Settings color
+                        font-weight: 800;
+                        font-size: 10px;
+                    }
+
+                    ComboBox {
+                        model: root.model_list;
+                        current-value: root.selected_model;
+                        selected(val) => {
+                            root.selected_model = val;
+                        }
+                    }
+                }
+
+                // Settings Section
+                VerticalLayout {
+                    spacing: 8px;
+                    TouchArea {
+                        clicked => {
+                            root.settings_expanded = !root.settings_expanded;
+                        }
+                        mouse-cursor: pointer;
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "SETTINGS";
+                                color: white;
+                                font-weight: 800;
+                                font-size: 10px;
+                            }
+
+                            Text {
+                                text: root.settings_expanded ? "v" : ">";
+                                color: #888;
+                                font-size: 10px;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        clip: true;
+                        height: root.settings_expanded ? 110px : 0px;
+                        animate height {
+                            duration: 200ms;
+                            easing: ease-in-out;
+                        }
+
+                        VerticalLayout {
+                            padding-top: 10px;
+                            spacing: 12px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "Default Model:";
+                                    color: #888;
+                                    font-size: 11px;
+                                }
+
+                                ComboBox {
+                                    model: root.model_list;
+                                    current-value: root.default_model_setting;
+                                    selected(val) => {
+                                        root.set_default_model(val);
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                CheckBox {
+                                    checked: root.scroll_lock;
+                                    toggled => {
+                                        root.scroll_lock = !root.scroll_lock;
+                                    }
+                                }
+
+                                Text {
+                                    text: "Sticky Scroll";
+                                    color: #aaaaaa;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: #343746;
+                }
+
+                // Chat History Header (White)
+                Text {
+                    text: "CHAT HISTORY";
+                    color: white; // Matched to Settings color
+                    font-weight: 800;
+                    font-size: 10px;
+                }
+
+                // History Viewer - Now stretches to fill space
+                ScrollView {
+                    vertical-stretch: 1;
+                    viewport-height: history_container.preferred-height;
+                    history_container := VerticalLayout {
+                        spacing: 6px;
+                        alignment: start; // Keep items at top of scroll area
+                        for entry in root.history_list: TouchArea {
+                            height: 36px;
+                            clicked => {
+                                root.load_session(entry.id);
+                            }
+                            mouse-cursor: pointer;
+                            Rectangle {
+                                background: #1e202d;
+                                border-radius: 4px;
+                                Text {
+                                    x: 10px;
+                                    width: parent.width - 20px;
+                                    text: entry.title;
+                                    color: #bbb;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Spacer pushes the version to the very bottom
+                Rectangle {
+                    vertical-stretch: 0;
+                    height: 10px;
+                }
+
+                Text {
+                    text: root.version;
+                    color: #444;
+                    font-size: 9px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        TouchArea {
+            x: sidebar.width;
+            width: 30px;
+            height: 100%;
+            visible: root.sidebar_expanded;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.move) {
+                    root.sidebar_expanded = false;
+                }
+            }
+        }
+    }
+}
