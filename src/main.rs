@@ -7,12 +7,14 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use slint::{Model, VecModel, SharedString, ComponentHandle};
 use std::rc::Rc;
+use std::fs;
+use std::path::PathBuf;
 
 struct AppState {
     db: Connection,
     current_session_id: String,
     chat_history: Vec<ChatMessage>,
-    attachments: Vec<(String, String)>,
+    attachments: Vec<(String, PathBuf)>,
 }
 
 #[tokio::main]
@@ -58,16 +60,21 @@ async fn main() -> Result<(), slint::PlatformError> {
     let u_pick = ui_handle.clone();
     ui.on_pick_attachment(move || {
         if let Some(path) = rfd::FileDialog::new().pick_file() {
-            if let Ok(bytes) = std::fs::read(&path) {
-                if let Ok(content) = String::from_utf8(bytes) {
-                    let mut s = s_pick.lock().unwrap();
-                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    s.attachments.push((filename, content));
-                    let names: Vec<SharedString> = s.attachments.iter().map(|(n, _)| n.into()).collect();
-                    let _ = u_pick.upgrade_in_event_loop(move |ui| {
-                        ui.set_attachment_list(Rc::new(VecModel::from(names)).into());
-                    });
-                }
+            let mut s = s_pick.lock().unwrap();
+            let session_id = s.current_session_id.clone();
+            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+            let mut dest_dir = PathBuf::from("./attachments");
+            dest_dir.push(&session_id);
+            let _ = fs::create_dir_all(&dest_dir);
+
+            let dest_path = dest_dir.join(&filename);
+            if fs::copy(&path, &dest_path).is_ok() {
+                s.attachments.push((filename, dest_path));
+                let names: Vec<SharedString> = s.attachments.iter().map(|(n, _)| n.into()).collect();
+                let _ = u_pick.upgrade_in_event_loop(move |ui| {
+                    ui.set_attachment_list(Rc::new(VecModel::from(names)).into());
+                });
             }
         }
     });
@@ -92,7 +99,6 @@ async fn main() -> Result<(), slint::PlatformError> {
         let id_str = id.to_string();
         let mut history_to_load = Vec::new();
 
-        // SCOPE FIX: We use a block to ensure stmt is dropped before we mutate s
         {
             let mut stmt = s.db.prepare("SELECT role, content FROM messages WHERE session_id = ?1").unwrap();
             let rows = stmt.query_map([&id_str], |row| {
@@ -107,12 +113,25 @@ async fn main() -> Result<(), slint::PlatformError> {
         }
 
         s.chat_history = history_to_load;
-        s.current_session_id = id_str;
+        s.current_session_id = id_str.clone();
         s.attachments.clear();
 
+        let mut attach_dir = PathBuf::from("./attachments");
+        attach_dir.push(&id_str);
+        if let Ok(entries) = fs::read_dir(attach_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    s.attachments.push((name, path));
+                }
+            }
+        }
+
         let history_copy = s.chat_history.clone();
+        let attachment_names: Vec<SharedString> = s.attachments.iter().map(|(n, _)| n.into()).collect();
         let _ = u_load.upgrade_in_event_loop(move |ui| {
-            ui.set_attachment_list(Rc::new(VecModel::from(vec![])).into());
+            ui.set_attachment_list(Rc::new(VecModel::from(attachment_names)).into());
             update_ui_model(&ui, &history_copy);
         });
     });
@@ -139,16 +158,6 @@ async fn main() -> Result<(), slint::PlatformError> {
         let raw_input = msg.to_string();
         let session_id = s.current_session_id.clone();
 
-        let mut full_message = String::new();
-        if !s.attachments.is_empty() {
-            full_message.push_str("Context from files:\n");
-            for (name, content) in &s.attachments {
-                full_message.push_str(&format!("[{}]\n{}\n", name, content));
-            }
-        }
-        full_message.push_str(&raw_input);
-        s.attachments.clear();
-
         if s.chat_history.is_empty() {
             let _ = s.db.execute(
                 "INSERT INTO sessions (id, title, created_at) VALUES (?1, ?2, datetime('now'))",
@@ -156,19 +165,32 @@ async fn main() -> Result<(), slint::PlatformError> {
             );
         }
 
-        s.chat_history.push(ChatMessage::user(full_message.clone()));
+        s.chat_history.push(ChatMessage::user(raw_input.clone()));
         let _ = s.db.execute(
             "INSERT INTO messages (session_id, role, content) VALUES (?1, 'user', ?2)",
-            params![session_id, full_message]
+            params![session_id, raw_input]
         );
 
         let model_name = u_send.upgrade().map(|ui| ui.get_selected_model().to_string()).unwrap_or_else(|| "llama3".into());
         let o_client = o_send.clone();
 
-        // MOVE FIX: Clone once for the UI update and once for the tokio thread
-        let history_for_ui = s.chat_history.clone();
-        let history_for_ai = s.chat_history.clone();
+        let mut history_for_ai = s.chat_history.clone();
+        let mut prompt_with_context = String::new();
+        if !s.attachments.is_empty() {
+            prompt_with_context.push_str("Context from files:\n");
+            for (name, path) in &s.attachments {
+                if let Ok(content) = fs::read_to_string(path) {
+                    prompt_with_context.push_str(&format!("[{}]\n{}\n", name, content));
+                }
+            }
+        }
+        prompt_with_context.push_str(&raw_input);
 
+        if let Some(last_msg) = history_for_ai.last_mut() {
+            last_msg.content = prompt_with_context;
+        }
+
+        let history_for_ui = s.chat_history.clone();
         let inner_u = u_send.clone();
         let inner_s = s_send.clone();
 
