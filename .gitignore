@@ -6,7 +6,7 @@
 
 # Allow specific files in the root
 !/Cargo.toml
-
+!/clear.sh
 # ALLOW DIRECTORIES (This is the missing step)
 !/src/
 !/ui/
