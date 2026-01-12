@@ -11,6 +11,7 @@ struct AppState {
     db: Connection,
     current_session_id: String,
     chat_history: Vec<ChatMessage>,
+    attachments: Vec<(String, String)>, // (Filename, Content)
 }
 
 #[tokio::main]
@@ -27,6 +28,7 @@ async fn main() -> Result<(), slint::PlatformError> {
         db,
         current_session_id: Uuid::new_v4().to_string(),
         chat_history: Vec::new(),
+        attachments: Vec::new(),
     }));
 
     let ui_handle = ui.as_weak();
@@ -74,6 +76,44 @@ async fn main() -> Result<(), slint::PlatformError> {
 
     // --- UI Callbacks ---
 
+    let s_pick = state.clone();
+    let u_pick = ui_handle.clone();
+    ui.on_pick_attachment(move || {
+        if let Some(path) = rfd::FileDialog::new().pick_file() {
+            if let Ok(bytes) = std::fs::read(&path) {
+                // Strict UTF-8 Decoding
+                if let Ok(content) = String::from_utf8(bytes) {
+                     let mut s = s_pick.lock().unwrap();
+                     let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                     s.attachments.push((filename, content));
+
+                     // Update UI List
+                     let names: Vec<slint::SharedString> = s.attachments.iter().map(|(n, _)| n.into()).collect();
+                     let _ = u_pick.upgrade_in_event_loop(move |ui| {
+                        ui.set_attachment_list(std::rc::Rc::new(slint::VecModel::from(names)).into());
+                     });
+                } else {
+                    eprintln!("File rejected: Non-UTF8 content.");
+                }
+            }
+        }
+    });
+
+    let s_remove = state.clone();
+    let u_remove = ui_handle.clone();
+    ui.on_remove_attachment(move |index| {
+        let mut s = s_remove.lock().unwrap();
+        if index >= 0 && (index as usize) < s.attachments.len() {
+            s.attachments.remove(index as usize);
+
+            // Update UI List
+            let names: Vec<slint::SharedString> = s.attachments.iter().map(|(n, _)| n.into()).collect();
+            let _ = u_remove.upgrade_in_event_loop(move |ui| {
+               ui.set_attachment_list(std::rc::Rc::new(slint::VecModel::from(names)).into());
+            });
+        }
+    });
+
     ui.on_set_default_model(move |model| {
         let _ = confy::store("ollama-native", None, serde_json::json!({ "default_model": model.to_string() }));
     });
@@ -99,6 +139,11 @@ async fn main() -> Result<(), slint::PlatformError> {
         }
         s.chat_history = history_to_load;
         s.current_session_id = id_str;
+        // Clear attachments on session switch
+        s.attachments.clear();
+        let _ = u_load.upgrade_in_event_loop(|ui| {
+             ui.set_attachment_list(std::rc::Rc::new(slint::VecModel::from(vec![])).into());
+        });
         update_ui_text(&u_load, &s.chat_history);
     });
 
@@ -110,7 +155,11 @@ async fn main() -> Result<(), slint::PlatformError> {
         f_clear(s.current_session_id.clone(), s.chat_history.clone());
         s.current_session_id = Uuid::new_v4().to_string();
         s.chat_history.clear();
-        let _ = u_clear.upgrade_in_event_loop(|ui| ui.set_chat_text("".into()));
+        s.attachments.clear();
+        let _ = u_clear.upgrade_in_event_loop(|ui| {
+            ui.set_chat_text("".into());
+            ui.set_attachment_list(std::rc::Rc::new(slint::VecModel::from(vec![])).into());
+        });
         refresh_history(&u_clear, &s.db);
     });
 
@@ -119,16 +168,33 @@ async fn main() -> Result<(), slint::PlatformError> {
     let o_send = ollama.clone();
     ui.on_send_message(move |msg| {
         let mut s = s_send.lock().unwrap();
-        let msg_str = msg.to_string();
+        let raw_msg_str = msg.to_string();
         let session_id = s.current_session_id.clone();
+
+        // Inject Attachments
+        let mut full_message = String::new();
+        if !s.attachments.is_empty() {
+            full_message.push_str("System: The following files are attached to this message:\n\n");
+            for (name, content) in &s.attachments {
+                full_message.push_str(&format!("--- BEGIN FILE: {} ---\n{}\n--- END FILE ---\n\n", name, content));
+            }
+        }
+        full_message.push_str(&raw_msg_str);
+
+        // Clear attachments after sending
+        s.attachments.clear();
+        let _ = u_send.upgrade_in_event_loop(|ui| {
+            ui.set_attachment_list(std::rc::Rc::new(slint::VecModel::from(vec![])).into());
+        });
 
         // Create session in DB if this is the first message
         if s.chat_history.is_empty() {
-            let _ = s.db.execute("INSERT INTO sessions (id, title, created_at) VALUES (?1, ?2, datetime('now'))", params![session_id, msg_str]);
+            let _ = s.db.execute("INSERT INTO sessions (id, title, created_at) VALUES (?1, ?2, datetime('now'))", params![session_id, raw_msg_str]);
         }
 
-        s.chat_history.push(ChatMessage::user(msg_str.clone()));
-        let _ = s.db.execute("INSERT INTO messages (session_id, role, content) VALUES (?1, 'user', ?2)", params![session_id, msg_str]);
+        s.chat_history.push(ChatMessage::user(full_message.clone()));
+        // Note: storing the full content including file in DB
+        let _ = s.db.execute("INSERT INTO messages (session_id, role, content) VALUES (?1, 'user', ?2)", params![session_id, full_message]);
         update_ui_text(&u_send, &s.chat_history);
 
         let model = u_send.upgrade().map(|ui| ui.get_selected_model().to_string()).unwrap_or_else(|| "llama3".into());

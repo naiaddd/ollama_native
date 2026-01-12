@@ -5,7 +5,6 @@ import {
     ComboBox,
     CheckBox,
 } from "std-widgets.slint";
-
 export struct HistoryEntry {
     id: string,
     title: string,
@@ -23,6 +22,7 @@ export component AppWindow inherits Window {
     in property <string> chat_text: "";
     in property <string> version: "v1.0.0 Stable";
     in property <[HistoryEntry]> history_list: [];
+    in property <[string]> attachment_list: [];
 
     in-out property <bool> scroll_lock: true;
     property <bool> sidebar_expanded: false;
@@ -30,13 +30,14 @@ export component AppWindow inherits Window {
 
     callback send_message(string);
     callback clear_chat();
+    callback pick_attachment();
+    callback remove_attachment(int);
     callback set_default_model(string);
     callback load_session(string);
 
     Rectangle {
         width: 100%;
         height: 100%;
-
         main_layout := VerticalLayout {
             padding: 20px;
             padding-left: 65px;
@@ -84,6 +85,71 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // Attachment Indicators (Top Left)
+                HorizontalLayout {
+                    x: 20px;
+                    y: 20px;
+                    spacing: 8px;
+                    for file[i] in root.attachment_list : t-area := TouchArea {
+                        width: 8px;
+                        height: 8px;
+                        mouse-cursor: pointer;
+                        clicked => { root.remove_attachment(i); }
+
+                        Rectangle {
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: white;
+                        }
+
+                        // Tooltip on Hover
+                        // FIXED: Referencing t-area instead of parent
+                        if (t-area.has-hover) : Rectangle {
+                            z: 100;
+                            y: 12px;
+                            background: #222;
+                            border-radius: 4px;
+
+                            HorizontalLayout {
+                                padding: 4px;
+                                Text {
+                                    text: file;
+                                    color: white;
+                                    font-size: 10px;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Attach File Button (Left of Clear Chat)
+                TouchArea {
+                    x: parent.width - 75px;
+                    y: 15px;
+                    width: 25px;
+                    height: 25px;
+                    clicked => {
+                        root.pick_attachment();
+                    }
+                    mouse-cursor: pointer;
+                    Rectangle {
+                        background: #333;
+                        border-radius: 4px;
+                        opacity: 0.5;
+                    }
+
+                    // Single Vertical Line
+                    Rectangle {
+                        background: #aaa;
+                        width: 2px;
+                        height: 12px;
+                        x: 11.5px;
+                        y: 6.5px;
+                    }
+                }
+
+                // clear chat button
                 TouchArea {
                     x: parent.width - 40px;
                     y: 15px;
@@ -147,7 +213,6 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 15px;
                 spacing: 20px;
-                // Removed alignment: start to allow vertical-stretch to work
                 visible: root.sidebar_expanded;
 
                 // Active Model Header (White)
@@ -155,7 +220,7 @@ export component AppWindow inherits Window {
                     spacing: 5px;
                     Text {
                         text: "ACTIVE MODEL";
-                        color: white; // Matched to Settings color
+                        color: white;
                         font-weight: 800;
                         font-size: 10px;
                     }
@@ -251,18 +316,18 @@ export component AppWindow inherits Window {
                 // Chat History Header (White)
                 Text {
                     text: "CHAT HISTORY";
-                    color: white; // Matched to Settings color
+                    color: white;
                     font-weight: 800;
                     font-size: 10px;
                 }
 
-                // History Viewer - Now stretches to fill space
+                // History Viewer
                 ScrollView {
                     vertical-stretch: 1;
                     viewport-height: history_container.preferred-height;
                     history_container := VerticalLayout {
                         spacing: 6px;
-                        alignment: start; // Keep items at top of scroll area
+                        alignment: start;
                         for entry in root.history_list: TouchArea {
                             height: 36px;
                             clicked => {
@@ -286,7 +351,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Spacer pushes the version to the very bottom
                 Rectangle {
                     vertical-stretch: 0;
                     height: 10px;
