@@ -1,14 +1,14 @@
 slint::include_modules!();
 use futures::StreamExt;
+use ollama_rs::generation::chat::{request::ChatMessageRequest, ChatMessage};
 use ollama_rs::Ollama;
-use ollama_rs::generation::chat::{ChatMessage, request::ChatMessageRequest};
 use rusqlite::{params, Connection};
-use std::sync::{Arc, Mutex};
-use uuid::Uuid;
-use slint::{Model, VecModel, SharedString, ComponentHandle};
-use std::rc::Rc;
+use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use uuid::Uuid;
 
 struct AppState {
     db: Connection,
@@ -24,7 +24,11 @@ async fn main() -> Result<(), slint::PlatformError> {
 
     let db = Connection::open("history.db").expect("Failed to open DB");
     db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, title TEXT, created_at DATETIME)", []).unwrap();
-    db.execute("CREATE TABLE IF NOT EXISTS messages (session_id TEXT, role TEXT, content TEXT)", []).unwrap();
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS messages (session_id TEXT, role TEXT, content TEXT)",
+        [],
+    )
+    .unwrap();
 
     let state = Arc::new(Mutex::new(AppState {
         db,
@@ -36,10 +40,16 @@ async fn main() -> Result<(), slint::PlatformError> {
     let ui_handle = ui.as_weak();
     refresh_history(&ui_handle, &state.lock().unwrap().db);
 
-    let cfg: serde_json::Value = confy::load("ollama-native", None).unwrap_or(serde_json::json!({
-        "default_model": "llama3",
-        "scroll_lock": true
-    }));
+    let cfg: serde_json::Value = match confy::load("ollama-native", None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to load config: {}. Using Defaults.", e);
+            serde_json::json!({
+                "default_model":"llama3",
+                "scroll_lock":false
+            })
+        }
+    };
 
     ui.set_default_model_setting(cfg["default_model"].as_str().unwrap_or("llama3").into());
     ui.set_selected_model(cfg["default_model"].as_str().unwrap_or("llama3").into());
@@ -62,19 +72,27 @@ async fn main() -> Result<(), slint::PlatformError> {
         if let Some(path) = rfd::FileDialog::new().pick_file() {
             let mut s = s_pick.lock().unwrap();
             let session_id = s.current_session_id.clone();
-            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
             let mut dest_dir = PathBuf::from("./attachments");
             dest_dir.push(&session_id);
             let _ = fs::create_dir_all(&dest_dir);
 
             let dest_path = dest_dir.join(&filename);
-            if fs::copy(&path, &dest_path).is_ok() {
+            if let Ok(_) = fs::copy(&path, &dest_path) {
                 s.attachments.push((filename, dest_path));
-                let names: Vec<SharedString> = s.attachments.iter().map(|(n, _)| n.into()).collect();
+                let names: Vec<SharedString> =
+                    s.attachments.iter().map(|(n, _)| n.into()).collect();
                 let _ = u_pick.upgrade_in_event_loop(move |ui| {
                     ui.set_attachment_list(Rc::new(VecModel::from(names)).into());
                 });
+            } else {
+                let err = fs::copy(&path, &dest_path).err().unwrap();
+                eprintln!("Error copying attachment: {}", err);
             }
         }
     });
@@ -100,15 +118,25 @@ async fn main() -> Result<(), slint::PlatformError> {
         let mut history_to_load = Vec::new();
 
         {
-            let mut stmt = s.db.prepare("SELECT role, content FROM messages WHERE session_id = ?1").unwrap();
-            let rows = stmt.query_map([&id_str], |row| {
-                let role: String = row.get(0)?;
-                let content: String = row.get(1)?;
-                Ok(if role == "user" { ChatMessage::user(content) } else { ChatMessage::assistant(content) })
-            }).unwrap();
+            let mut stmt =
+                s.db.prepare("SELECT role, content FROM messages WHERE session_id = ?1")
+                    .unwrap();
+            let rows = stmt
+                .query_map([&id_str], |row| {
+                    let role: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    Ok(if role == "user" {
+                        ChatMessage::user(content)
+                    } else {
+                        ChatMessage::assistant(content)
+                    })
+                })
+                .unwrap();
 
             for r in rows {
-                if let Ok(msg) = r { history_to_load.push(msg); }
+                if let Ok(msg) = r {
+                    history_to_load.push(msg);
+                }
             }
         }
 
@@ -122,14 +150,19 @@ async fn main() -> Result<(), slint::PlatformError> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     s.attachments.push((name, path));
                 }
             }
         }
 
         let history_copy = s.chat_history.clone();
-        let attachment_names: Vec<SharedString> = s.attachments.iter().map(|(n, _)| n.into()).collect();
+        let attachment_names: Vec<SharedString> =
+            s.attachments.iter().map(|(n, _)| n.into()).collect();
         let _ = u_load.upgrade_in_event_loop(move |ui| {
             ui.set_attachment_list(Rc::new(VecModel::from(attachment_names)).into());
             update_ui_model(&ui, &history_copy);
@@ -161,17 +194,20 @@ async fn main() -> Result<(), slint::PlatformError> {
         if s.chat_history.is_empty() {
             let _ = s.db.execute(
                 "INSERT INTO sessions (id, title, created_at) VALUES (?1, ?2, datetime('now'))",
-                params![session_id, raw_input]
+                params![session_id, raw_input],
             );
         }
 
         s.chat_history.push(ChatMessage::user(raw_input.clone()));
         let _ = s.db.execute(
             "INSERT INTO messages (session_id, role, content) VALUES (?1, 'user', ?2)",
-            params![session_id, raw_input]
+            params![session_id, raw_input],
         );
 
-        let model_name = u_send.upgrade().map(|ui| ui.get_selected_model().to_string()).unwrap_or_else(|| "llama3".into());
+        let model_name = u_send
+            .upgrade()
+            .map(|ui| ui.get_selected_model().to_string())
+            .unwrap_or_else(|| "llama3".into());
         let o_client = o_send.clone();
 
         let mut history_for_ai = s.chat_history.clone();
@@ -205,8 +241,13 @@ async fn main() -> Result<(), slint::PlatformError> {
 
                 let _ = inner_u.upgrade_in_event_loop(|ui| {
                     let model = ui.get_chat_messages();
-                    if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<ChatMessageData>>() {
-                        vec_model.push(ChatMessageData { role: "AI".into(), content: "".into() });
+                    if let Some(vec_model) =
+                        model.as_any().downcast_ref::<VecModel<ChatMessageData>>()
+                    {
+                        vec_model.push(ChatMessageData {
+                            role: "AI".into(),
+                            content: "".into(),
+                        });
                     }
                 });
 
@@ -217,21 +258,28 @@ async fn main() -> Result<(), slint::PlatformError> {
 
                     let _ = inner_u.upgrade_in_event_loop(move |ui| {
                         let model = ui.get_chat_messages();
-                        if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<ChatMessageData>>() {
+                        if let Some(vec_model) =
+                            model.as_any().downcast_ref::<VecModel<ChatMessageData>>()
+                        {
                             let row_idx = vec_model.row_count() - 1;
-                            vec_model.set_row_data(row_idx, ChatMessageData {
-                                role: "AI".into(),
-                                content: current_text
-                            });
+                            vec_model.set_row_data(
+                                row_idx,
+                                ChatMessageData {
+                                    role: "AI".into(),
+                                    content: current_text,
+                                },
+                            );
                         }
                     });
                 }
 
                 let mut s_final = inner_s.lock().unwrap();
-                s_final.chat_history.push(ChatMessage::assistant(full_response.clone()));
+                s_final
+                    .chat_history
+                    .push(ChatMessage::assistant(full_response.clone()));
                 let _ = s_final.db.execute(
                     "INSERT INTO messages (session_id, role, content) VALUES (?1, 'assistant', ?2)",
-                    params![session_id, full_response]
+                    params![session_id, full_response],
                 );
                 refresh_history(&inner_u, &s_final.db);
             }
@@ -242,9 +290,14 @@ async fn main() -> Result<(), slint::PlatformError> {
 }
 
 fn update_ui_model(ui: &AppWindow, history: &[ChatMessage]) {
-    let ui_messages: Vec<ChatMessageData> = history.iter()
+    let ui_messages: Vec<ChatMessageData> = history
+        .iter()
         .map(|m| ChatMessageData {
-            role: if m.role == ollama_rs::generation::chat::MessageRole::User { "User".into() } else { "AI".into() },
+            role: if m.role == ollama_rs::generation::chat::MessageRole::User {
+                "User".into()
+            } else {
+                "AI".into()
+            },
             content: m.content.clone().into(),
         })
         .collect();
@@ -252,13 +305,19 @@ fn update_ui_model(ui: &AppWindow, history: &[ChatMessage]) {
 }
 
 fn refresh_history(ui_weak: &slint::Weak<AppWindow>, db: &Connection) {
-    let mut stmt = db.prepare("SELECT id, title FROM sessions ORDER BY created_at DESC").unwrap();
-    let history_items: Vec<HistoryEntry> = stmt.query_map([], |row| {
-        Ok(HistoryEntry {
-            id: row.get::<usize, String>(0).unwrap().into(),
-            title: row.get::<usize, String>(1).unwrap().into()
+    let mut stmt = db
+        .prepare("SELECT id, title FROM sessions ORDER BY created_at DESC")
+        .unwrap();
+    let history_items: Vec<HistoryEntry> = stmt
+        .query_map([], |row| {
+            Ok(HistoryEntry {
+                id: row.get::<usize, String>(0).unwrap().into(),
+                title: row.get::<usize, String>(1).unwrap().into(),
+            })
         })
-    }).unwrap().map(|r| r.unwrap()).collect();
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
 
     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
         ui.set_history_list(Rc::new(VecModel::from(history_items)).into());
